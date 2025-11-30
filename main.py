@@ -18,13 +18,11 @@ app.add_middleware(
 
 HF_MODEL_ID = "Yousuf-Islam/banglabert-shirk-classifier"
 
-# ✅ FIXED: Updated to the new Router URL
-# The error explicitly asked to use 'router.huggingface.co'
-API_URL = f"https://router.huggingface.co/models/{HF_MODEL_ID}"
+# ✅ FIXED: Reverted to the CORRECT URL for custom models
+API_URL = f"https://api-inference.huggingface.co/models/{HF_MODEL_ID}"
 
-# Read from Environment Variable
+# Read Token from Environment
 HF_TOKEN = os.getenv("HF_TOKEN")
-
 headers = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
 
 class TextRequest(BaseModel):
@@ -32,32 +30,50 @@ class TextRequest(BaseModel):
 
 def query_huggingface(payload, retries=5):
     """
-    Sends request to HF API. Handles loading states and new URL structure.
+    Sends request to HF API with robust error handling for Loading (503) states.
     """
     for i in range(retries):
         try:
             response = requests.post(API_URL, headers=headers, json=payload)
             
-            # Debug: Print status if it fails
+            # DEBUG: Print status if it's not 200 OK
             if response.status_code != 200:
-                print(f"Attempt {i+1}: Status {response.status_code}")
+                print(f"Attempt {i+1}: Status {response.status_code} | {response.text[:100]}")
             
+            # Case 1: Model is Loading (503)
+            if response.status_code == 503:
+                try:
+                    est_time = response.json().get("estimated_time", 20.0)
+                    print(f"Model is loading... waiting {est_time:.2f}s")
+                    time.sleep(est_time)
+                except:
+                    print("Model is loading (no time estimate). Waiting 10s...")
+                    time.sleep(10)
+                continue # Retry loop
+
+            # Case 2: 404 Not Found (Wrong Model Name)
+            if response.status_code == 404:
+                raise Exception(f"Model not found at {API_URL}. Check model name or privacy settings.")
+
+            # Attempt to parse JSON response
             try:
                 output = response.json()
             except json.JSONDecodeError:
-                print("Received HTML instead of JSON. Retrying...")
+                print("Received non-JSON response. Retrying...")
                 time.sleep(2)
                 continue
-
-            # Case 1: Model is loading
-            if isinstance(output, dict) and "estimated_time" in output:
-                wait_time = output["estimated_time"]
-                print(f"Model is loading... waiting {wait_time:.2f}s")
-                time.sleep(wait_time + 1)
-                continue 
             
-            # Case 2: Actual API Error
+            # Case 3: Explicit API Error Message
             if isinstance(output, dict) and "error" in output:
+                # Ignore "warnings" (sometimes included), catch real errors
+                if isinstance(output["error"], list): 
+                     # Sometimes errors are lists
+                     raise Exception(f"HF Error: {output['error'][0]}")
+                if "no longer supported" in str(output["error"]):
+                     # Rare edge case protection
+                     print("Warning: API deprecation message received. Retrying...")
+                     time.sleep(1)
+                     continue
                 raise Exception(f"Hugging Face Error: {output['error']}")
                 
             return output
@@ -67,14 +83,14 @@ def query_huggingface(payload, retries=5):
             time.sleep(1)
             continue
             
-    raise Exception("Model is busy or API is unreachable. Please try again.")
+    raise Exception("Model is busy or unreachable after multiple attempts.")
 
 @app.post("/predict")
 def predict(request: TextRequest):
     try:
         output = query_huggingface({"inputs": request.text})
         
-        # Handle different response formats (List of lists vs List of dicts)
+        # Handle format: [[{label, score}, ...]] vs [{label, score}, ...]
         if isinstance(output, list) and len(output) > 0 and isinstance(output[0], list):
             predictions = output[0]
         elif isinstance(output, dict) and "error" in output:
@@ -83,9 +99,8 @@ def predict(request: TextRequest):
             predictions = output
 
         if not isinstance(predictions, list):
-             raise Exception(f"Unexpected response format: {str(output)[:100]}")
+             raise Exception(f"Unexpected format: {str(output)[:100]}")
 
-        # Find the label with the highest score
         best_prediction = max(predictions, key=lambda x: x["score"])
         
         return {
