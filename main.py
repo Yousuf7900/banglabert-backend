@@ -18,10 +18,11 @@ app.add_middleware(
 
 HF_MODEL_ID = "Yousuf-Islam/banglabert-shirk-classifier"
 
-# ✅ FIXED: Reverted to the CORRECT URL for custom models
-API_URL = f"https://api-inference.huggingface.co/models/{HF_MODEL_ID}"
+# ✅ FIXED: The EXACT new URL structure required by Hugging Face
+# Previous error 404/410 was because we missed the '/hf-inference' part
+API_URL = f"https://router.huggingface.co/hf-inference/models/{HF_MODEL_ID}"
 
-# Read Token from Environment
+# Token from Environment
 HF_TOKEN = os.getenv("HF_TOKEN")
 headers = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
 
@@ -30,7 +31,7 @@ class TextRequest(BaseModel):
 
 def query_huggingface(payload, retries=5):
     """
-    Sends request to HF API with robust error handling for Loading (503) states.
+    Sends request to HF API with the NEW URL structure.
     """
     for i in range(retries):
         try:
@@ -51,10 +52,6 @@ def query_huggingface(payload, retries=5):
                     time.sleep(10)
                 continue # Retry loop
 
-            # Case 2: 404 Not Found (Wrong Model Name)
-            if response.status_code == 404:
-                raise Exception(f"Model not found at {API_URL}. Check model name or privacy settings.")
-
             # Attempt to parse JSON response
             try:
                 output = response.json()
@@ -63,17 +60,16 @@ def query_huggingface(payload, retries=5):
                 time.sleep(2)
                 continue
             
-            # Case 3: Explicit API Error Message
+            # Case 2: Explicit API Error Message
             if isinstance(output, dict) and "error" in output:
-                # Ignore "warnings" (sometimes included), catch real errors
+                # If error is a list (rare but happens)
                 if isinstance(output["error"], list): 
-                     # Sometimes errors are lists
                      raise Exception(f"HF Error: {output['error'][0]}")
+                
+                # Check for the specific "no longer supported" error again to be safe
                 if "no longer supported" in str(output["error"]):
-                     # Rare edge case protection
-                     print("Warning: API deprecation message received. Retrying...")
-                     time.sleep(1)
-                     continue
+                     print("CRITICAL: URL mismatch. Please check API_URL config.")
+                
                 raise Exception(f"Hugging Face Error: {output['error']}")
                 
             return output
@@ -116,4 +112,4 @@ def predict(request: TextRequest):
 
 @app.get("/")
 def home():
-    return {"status": "online", "model": HF_MODEL_ID}
+    return {"status": "online", "model": HF_MODEL_ID, "url_version": "router/hf-inference"}
