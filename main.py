@@ -1,14 +1,13 @@
 import os
 import requests
 import time
+import json
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# 1. Initialize the App
 app = FastAPI()
 
-# 2. CORS Setup (Required for Frontend)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,67 +16,65 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 3. Hugging Face Configuration
 HF_MODEL_ID = "Yousuf-Islam/banglabert-shirk-classifier"
+API_URL = f"https://api-inference.huggingface.co/models/{HF_MODEL_ID}"
 
-# ✅ FIXED: Updated to the new Router URL
-API_URL = f"https://router.huggingface.co/models/{HF_MODEL_ID}"
+# ✅ SECURE FIX: Read from Environment Variable
+# We will set this in Render Dashboard later.
+HF_TOKEN = os.getenv("HF_TOKEN")
 
-# Optional: If you hit rate limits, add your token here.
-# HF_TOKEN = "hf_xxxxxxxxxxxxxxxxxxxx" 
-# headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-headers = {} 
+headers = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
 
-# 4. Input Schema
 class TextRequest(BaseModel):
     text: str
 
-# 5. Prediction Logic
-def query_huggingface(payload, retries=3):
-    """
-    Sends request to HF API. Handles 'Model Loading' errors automatically.
-    """
+def query_huggingface(payload, retries=5):
     for i in range(retries):
         try:
             response = requests.post(API_URL, headers=headers, json=payload)
-            output = response.json()
             
-            # Case 1: Model is loading (common on free tier)
+            if response.status_code != 200:
+                print(f"Attempt {i+1}: Status {response.status_code}")
+            
+            try:
+                output = response.json()
+            except json.JSONDecodeError:
+                print("Received HTML instead of JSON. Retrying...")
+                time.sleep(2)
+                continue
+
             if isinstance(output, dict) and "estimated_time" in output:
                 wait_time = output["estimated_time"]
                 print(f"Model is loading... waiting {wait_time:.2f}s")
                 time.sleep(wait_time + 1)
-                continue # Try again
+                continue 
             
-            # Case 2: Actual Error
             if isinstance(output, dict) and "error" in output:
                 raise Exception(f"Hugging Face Error: {output['error']}")
                 
             return output
-            
+
         except requests.exceptions.ConnectionError:
-            # Handle potential connection blips
-            print("Connection error... retrying")
             time.sleep(1)
             continue
             
-    raise Exception("Model took too long to load or API is unreachable.")
+    raise Exception("Model is busy. Please try again in a moment.")
 
-# 6. API Endpoint
 @app.post("/predict")
 def predict(request: TextRequest):
     try:
-        # Send to Hugging Face
         output = query_huggingface({"inputs": request.text})
         
-        # The API returns a list of lists: [[{'label': 'shirk', 'score': 0.9}, ...]]
-        # We flatten this to get the inner list
         if isinstance(output, list) and len(output) > 0 and isinstance(output[0], list):
             predictions = output[0]
+        elif isinstance(output, dict) and "error" in output:
+            raise Exception(output["error"])
         else:
             predictions = output
 
-        # Sort by score (highest confidence first)
+        if not isinstance(predictions, list):
+             raise Exception("Unexpected response format.")
+
         best_prediction = max(predictions, key=lambda x: x["score"])
         
         return {
@@ -88,10 +85,9 @@ def predict(request: TextRequest):
         }
 
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"CRITICAL ERROR: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# 7. Health Check
 @app.get("/")
 def home():
     return {"status": "online", "model": HF_MODEL_ID}
