@@ -1,6 +1,5 @@
 fastapi
 uvicorn
 python-multipart
-torch
-transformers
-scikit-learn
+requests
+pydantic
